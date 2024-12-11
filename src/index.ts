@@ -16,10 +16,8 @@ import { promisify } from 'util';
 import path from 'path';
 import os from 'os';
 
-// Promisify exec for async/await usage
 const execAsync = promisify(exec);
 
-// Define schema for command execution
 const ExecuteCommandSchema = z.object({
   command: z.string().describe("The command to execute"),
   args: z.array(z.string()).optional().default([]).describe("Command arguments"),
@@ -30,7 +28,6 @@ const ExecuteCommandSchema = z.object({
   }).optional().default({})
 });
 
-// Schema for directory operations
 const ChangeDirectorySchema = z.object({
   path: z.string().describe("Directory path to change to")
 });
@@ -39,7 +36,6 @@ const GetCurrentDirectorySchema = z.object({});
 
 const GetTerminalInfoSchema = z.object({});
 
-// Server state interface
 interface ServerState {
   currentDirectory: string;
   lastExitCode: number | null;
@@ -60,7 +56,6 @@ class TerminalServer {
       }
     });
 
-    // Initialize state
     this.state = {
       currentDirectory: process.cwd(),
       lastExitCode: null,
@@ -147,7 +142,7 @@ class TerminalServer {
     const fullCommand = `${command} ${args.join(' ')}`;
     const execOptions = {
       cwd: options.cwd || this.state.currentDirectory,
-      timeout: options.timeout || 30000, // Default 30s timeout
+      timeout: options.timeout || 30000,
       env: {
         ...process.env,
         ...options.env
@@ -268,7 +263,6 @@ class TerminalServer {
   }
 }
 
-// Start server
 const server = new TerminalServer();
 server.run().catch((error) => {
   console.error("Fatal error running server:", error);
