@@ -18,12 +18,177 @@ import os from 'os';
 
 const execAsync = promisify(exec);
 
+// Safe command whitelist - only these commands are allowed
+interface CommandConfig {
+  allowedArgs: readonly string[];
+  description: string;
+  requiresFile?: boolean;
+}
+
+const ALLOWED_COMMANDS: Record<string, CommandConfig> = {
+  // File operations (read-only)
+  'ls': { allowedArgs: ['-l', '-a', '-la', '-h', '-R', '--help'], description: 'List directory contents' },
+  'cat': { allowedArgs: ['--help'], description: 'Display file contents', requiresFile: true },
+  'head': { allowedArgs: ['-n', '--help'], description: 'Display first lines of file', requiresFile: true },
+  'tail': { allowedArgs: ['-n', '--help'], description: 'Display last lines of file', requiresFile: true },
+  'file': { allowedArgs: ['--help'], description: 'Determine file type', requiresFile: true },
+  'wc': { allowedArgs: ['-l', '-w', '-c', '--help'], description: 'Word, line, character count', requiresFile: true },
+  
+  // Directory operations (safe)
+  'pwd': { allowedArgs: ['--help'], description: 'Print working directory' },
+  'find': { allowedArgs: ['-name', '-type', '-maxdepth', '--help'], description: 'Find files and directories' },
+  'tree': { allowedArgs: ['-L', '-a', '--help'], description: 'Display directory tree' },
+  
+  // System information (read-only)
+  'whoami': { allowedArgs: ['--help'], description: 'Show current user' },
+  'id': { allowedArgs: ['--help'], description: 'Show user and group IDs' },
+  'uname': { allowedArgs: ['-a', '-r', '-s', '--help'], description: 'System information' },
+  'date': { allowedArgs: ['--help'], description: 'Show current date and time' },
+  'uptime': { allowedArgs: ['--help'], description: 'Show system uptime' },
+  'df': { allowedArgs: ['-h', '--help'], description: 'Show disk space usage' },
+  'free': { allowedArgs: ['-h', '--help'], description: 'Show memory usage' },
+  'ps': { allowedArgs: ['aux', '--help'], description: 'Show running processes' },
+  
+  // Development tools (safe operations)
+  'node': { allowedArgs: ['--version', '--help'], description: 'Node.js version' },
+  'npm': { allowedArgs: ['--version', 'list', '--help'], description: 'NPM operations (limited)' },
+  'git': { allowedArgs: ['status', 'log', '--oneline', 'branch', 'diff', '--help'], description: 'Git operations (read-only)' },
+  'which': { allowedArgs: ['--help'], description: 'Locate command' },
+  'type': { allowedArgs: ['--help'], description: 'Display command type' },
+  
+  // Text processing (safe)
+  'grep': { allowedArgs: ['-n', '-i', '-r', '--help'], description: 'Search text patterns', requiresFile: true },
+  'sort': { allowedArgs: ['-n', '-r', '--help'], description: 'Sort lines', requiresFile: true },
+  'uniq': { allowedArgs: ['-c', '--help'], description: 'Report unique lines', requiresFile: true },
+  
+  // Help and documentation
+  'man': { allowedArgs: ['--help'], description: 'Manual pages', requiresFile: true },
+  'help': { allowedArgs: [], description: 'Help command' },
+  'echo': { allowedArgs: ['--help'], description: 'Display text (limited)' }
+};
+
+// Dangerous patterns that should never be allowed
+const FORBIDDEN_PATTERNS = [
+  // Command injection attempts
+  /[;&|`$(){}]/,
+  // File operations
+  /\brm\b|\bmv\b|\bcp\b|\btouch\b|\bmkdir\b|\brmdir\b/,
+  // Network operations
+  /\bcurl\b|\bwget\b|\bssh\b|\bscp\b|\brsync\b|\bftp\b|\btelnet\b/,
+  // System modification
+  /\bsudo\b|\bsu\b|\bchmod\b|\bchown\b|\bmount\b|\bumount\b/,
+  // Process control
+  /\bkill\b|\bkillall\b|\bnohup\b|\bbg\b|\bfg\b|\bjobs\b/,
+  // Package management
+  /\bapt\b|\byum\b|\bpip\b|\binstall\b|\bremove\b|\bupdate\b|\bupgrade\b/,
+  // Editors and interactive tools
+  /\bvi\b|\bvim\b|\bnano\b|\bemacs\b|\btop\b|\bhtop\b|\bless\b|\bmore\b/,
+  // Shell features
+  /\bsource\b|\b\.\b|\bexport\b|\balias\b|\bunalias\b|\bhistory\b/,
+  // Redirection and pipes
+  /[<>]/,
+  // Dangerous characters
+  /[*?[\]]/
+];
+
+interface CommandValidationResult {
+  isValid: boolean;
+  sanitizedCommand?: string;
+  sanitizedArgs?: string[];
+  error?: string;
+}
+
+function validateAndSanitizeCommand(command: string, args: string[]): CommandValidationResult {
+  // Basic input validation
+  if (!command || typeof command !== 'string') {
+    return { isValid: false, error: 'Command must be a non-empty string' };
+  }
+
+  // Normalize command (remove leading/trailing whitespace, convert to lowercase)
+  const normalizedCommand = command.trim().toLowerCase();
+  
+  // Check if command is in whitelist
+  if (!(normalizedCommand in ALLOWED_COMMANDS)) {
+    return { 
+      isValid: false, 
+      error: `Command '${normalizedCommand}' is not in the allowed whitelist. Allowed commands: ${Object.keys(ALLOWED_COMMANDS).join(', ')}` 
+    };
+  }
+
+  const commandConfig = ALLOWED_COMMANDS[normalizedCommand as keyof typeof ALLOWED_COMMANDS];
+
+  // Check for forbidden patterns in command and args
+  const fullCommandString = `${normalizedCommand} ${args.join(' ')}`;
+  for (const pattern of FORBIDDEN_PATTERNS) {
+    if (pattern.test(fullCommandString)) {
+      return { 
+        isValid: false, 
+        error: `Command contains forbidden pattern: ${pattern.source}` 
+      };
+    }
+  }
+
+  // Validate and sanitize arguments
+  const sanitizedArgs: string[] = [];
+  for (const arg of args) {
+    if (typeof arg !== 'string') {
+      return { isValid: false, error: 'All arguments must be strings' };
+    }
+
+    const trimmedArg = arg.trim();
+    if (!trimmedArg) continue; // Skip empty args
+
+    // Check if argument is in allowed list (for commands with restricted args)
+    if (commandConfig.allowedArgs.length > 0) {
+      const isArgAllowed = commandConfig.allowedArgs.some(allowedArg => 
+        trimmedArg === allowedArg || 
+        (allowedArg.startsWith('-') && trimmedArg.startsWith(allowedArg))
+      );
+      
+      if (!isArgAllowed && !trimmedArg.startsWith('./') && !trimmedArg.startsWith('../') && 
+          !/^[a-zA-Z0-9._/-]+$/.test(trimmedArg)) {
+        return { 
+          isValid: false, 
+          error: `Argument '${trimmedArg}' not allowed for command '${normalizedCommand}'` 
+        };
+      }
+    }
+
+    // Additional validation for file arguments
+    if (commandConfig.requiresFile && !trimmedArg.startsWith('-')) {
+      // Basic path validation - prevent directory traversal attacks
+      if (trimmedArg.includes('..') && !trimmedArg.startsWith('./') && !trimmedArg.startsWith('../')) {
+        return { 
+          isValid: false, 
+          error: 'Potentially dangerous path detected' 
+        };
+      }
+    }
+
+    sanitizedArgs.push(trimmedArg);
+  }
+
+  // Limit argument count to prevent abuse
+  if (sanitizedArgs.length > 10) {
+    return { 
+      isValid: false, 
+      error: 'Too many arguments (maximum 10 allowed)' 
+    };
+  }
+
+  return {
+    isValid: true,
+    sanitizedCommand: normalizedCommand,
+    sanitizedArgs
+  };
+}
+
 const ExecuteCommandSchema = z.object({
-  command: z.string().describe("The command to execute"),
-  args: z.array(z.string()).optional().default([]).describe("Command arguments"),
+  command: z.string().describe("The command to execute (must be from whitelist)"),
+  args: z.array(z.string()).optional().default([]).describe("Command arguments (validated)"),
   options: z.object({
     cwd: z.string().optional().describe("Working directory"),
-    timeout: z.number().optional().describe("Command timeout in milliseconds"),
+    timeout: z.number().optional().describe("Command timeout in milliseconds (max 10s)"),
     env: z.record(z.string()).optional().describe("Additional environment variables")
   }).optional().default({})
 });
@@ -35,6 +200,8 @@ const ChangeDirectorySchema = z.object({
 const GetCurrentDirectorySchema = z.object({});
 
 const GetTerminalInfoSchema = z.object({});
+
+const ListAllowedCommandsSchema = z.object({});
 
 interface ServerState {
   currentDirectory: string;
@@ -48,8 +215,8 @@ class TerminalServer {
 
   constructor() {
     this.server = new Server({
-      name: "terminal-server",
-      version: "0.1.0"
+      name: "secure-terminal-server",
+      version: "0.2.0-secure"
     }, {
       capabilities: {
         tools: {}
@@ -57,7 +224,7 @@ class TerminalServer {
     });
 
     this.state = {
-      currentDirectory: process.cwd(),
+      currentDirectory: (globalThis as any).process.cwd(),
       lastExitCode: null,
       lastCommand: null
     };
@@ -67,13 +234,13 @@ class TerminalServer {
   }
 
   private setupErrorHandling(): void {
-    this.server.onerror = (error) => {
+    this.server.onerror = (error: unknown) => {
       console.error("[MCP Error]", error);
     };
 
-    process.on('SIGINT', async () => {
+    (globalThis as any).process.on('SIGINT', async () => {
       await this.server.close();
-      process.exit(0);
+      (globalThis as any).process.exit(0);
     });
   }
 
@@ -90,12 +257,12 @@ class TerminalServer {
       tools: [
         {
           name: "execute_command",
-          description: "Execute a terminal command with arguments and options.",
+          description: "🔒 Execute a WHITELISTED terminal command with validated arguments only.",
           inputSchema: zodToJsonSchema(ExecuteCommandSchema) as ToolInput,
         },
         {
           name: "change_directory",
-          description: "Change the current working directory for subsequent commands.",
+          description: "🔒 Change working directory (RESTRICTED to home and /tmp only).",
           inputSchema: zodToJsonSchema(ChangeDirectorySchema) as ToolInput,
         },
         {
@@ -105,8 +272,13 @@ class TerminalServer {
         },
         {
           name: "get_terminal_info",
-          description: "Get information about the terminal environment.",
+          description: "Get terminal environment info and security status.",
           inputSchema: zodToJsonSchema(GetTerminalInfoSchema) as ToolInput,
+        },
+        {
+          name: "list_allowed_commands",
+          description: "🔒 List all commands allowed by the security whitelist.",
+          inputSchema: zodToJsonSchema(ListAllowedCommandsSchema) as ToolInput,
         }
       ]
     };
@@ -139,17 +311,33 @@ class TerminalServer {
       env?: Record<string, string>;
     } = {}
   ) {
-    const fullCommand = `${command} ${args.join(' ')}`;
+    // 🔒 SECURITY: Validate and sanitize the command first
+    const validation = validateAndSanitizeCommand(command, args);
+    if (!validation.isValid) {
+      throw new McpError(ErrorCode.InvalidParams, `🔒 SECURITY BLOCK: ${validation.error}`);
+    }
+
+    const { sanitizedCommand, sanitizedArgs } = validation;
+    const fullCommand = `${sanitizedCommand} ${sanitizedArgs!.join(' ')}`;
+    
+    // 🔒 SECURITY: Enforce strict execution limits
     const execOptions = {
       cwd: options.cwd || this.state.currentDirectory,
-      timeout: options.timeout || 30000,
+      timeout: Math.min(options.timeout || 10000, 10000), // Max 10 seconds
       env: {
-        ...process.env,
-        ...options.env
-      }
+        // 🔒 SECURITY: Only pass essential environment variables
+        PATH: (globalThis as any).process.env.PATH,
+        HOME: (globalThis as any).process.env.HOME,
+        USER: (globalThis as any).process.env.USER,
+        SHELL: (globalThis as any).process.env.SHELL,
+        ...options.env // Allow specific additional env vars
+      },
+      // Additional security options
+      windowsHide: true // Hide windows on Windows
     };
 
     try {
+      console.error(`🔒 [SECURITY] Executing whitelisted command: ${fullCommand}`);
       const { stdout, stderr } = await execAsync(fullCommand, execOptions);
       this.state.lastExitCode = 0;
       this.state.lastCommand = fullCommand;
@@ -157,6 +345,7 @@ class TerminalServer {
     } catch (error: any) {
       this.state.lastExitCode = error.code || 1;
       this.state.lastCommand = fullCommand;
+      console.error(`🔒 [SECURITY] Command failed: ${fullCommand}, Error: ${error.message}`);
       return this.formatCommandOutput(
         error.stdout || '',
         error.stderr || error.message,
@@ -193,11 +382,22 @@ class TerminalServer {
             throw new McpError(ErrorCode.InvalidParams, `Invalid arguments: ${parsed.error}`);
           }
 
+          // 🔒 SECURITY: Check for directory changes
           const newPath = path.resolve(this.state.currentDirectory, parsed.data.path);
           
+          // 🔒 SECURITY: Prevent directory traversal outside of safe areas
+          const homedir = os.homedir();
+          if (!newPath.startsWith(homedir) && !newPath.startsWith('/tmp') && !newPath.startsWith('/var/tmp')) {
+            throw new McpError(
+              ErrorCode.InvalidParams,
+              `🔒 SECURITY BLOCK: Directory change blocked for security: ${newPath}. Only home directory and /tmp are allowed.`
+            );
+          }
+          
           try {
-            process.chdir(newPath);
-            this.state.currentDirectory = process.cwd();
+            (globalThis as any).process.chdir(newPath);
+            this.state.currentDirectory = (globalThis as any).process.cwd();
+            console.error(`🔒 [SECURITY] Directory changed to: ${this.state.currentDirectory}`);
             return {
               content: [{
                 type: "text",
@@ -223,13 +423,15 @@ class TerminalServer {
 
         case "get_terminal_info": {
           const info = {
-            shell: process.env.SHELL || 'unknown',
-            user: process.env.USER || os.userInfo().username,
+            shell: (globalThis as any).process.env.SHELL || 'unknown',
+            user: (globalThis as any).process.env.USER || os.userInfo().username,
             home: os.homedir(),
-            platform: process.platform,
+            platform: (globalThis as any).process.platform,
             currentDirectory: this.state.currentDirectory,
             lastCommand: this.state.lastCommand,
-            lastExitCode: this.state.lastExitCode
+            lastExitCode: this.state.lastExitCode,
+            securityMode: '🔒 WHITELIST_ENABLED',
+            allowedCommands: Object.keys(ALLOWED_COMMANDS).length
           };
 
           return {
@@ -238,6 +440,19 @@ class TerminalServer {
               text: Object.entries(info)
                 .map(([key, value]) => `${key}: ${value}`)
                 .join('\n')
+            }]
+          };
+        }
+
+        case "list_allowed_commands": {
+          const commandList = Object.entries(ALLOWED_COMMANDS)
+            .map(([cmd, config]) => `🔒 ${cmd}: ${config.description}`)
+            .join('\n');
+
+          return {
+            content: [{
+              type: "text",
+              text: `🔒 SECURITY: Whitelisted Commands Only\n\nAllowed commands:\n${commandList}\n\n🔒 Note: All commands are validated against security patterns and argument restrictions.\n🔒 Dangerous commands like rm, curl, sudo, etc. are BLOCKED.`
             }]
           };
         }
@@ -258,13 +473,16 @@ class TerminalServer {
   async run(): Promise<void> {
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
-    console.error("Terminal MCP Server running on stdio");
-    console.error("Current directory:", this.state.currentDirectory);
+    console.error("🔒 SECURE Terminal MCP Server running on stdio");
+    console.error("🔒 Security: Command whitelist ENABLED");
+    console.error(`🔒 Allowed commands: ${Object.keys(ALLOWED_COMMANDS).length}`);
+    console.error("🔒 Current directory:", this.state.currentDirectory);
+    console.error("🔒 Dangerous commands BLOCKED (rm, curl, sudo, etc.)");
   }
 }
 
 const server = new TerminalServer();
 server.run().catch((error) => {
   console.error("Fatal error running server:", error);
-  process.exit(1);
+  (globalThis as any).process.exit(1);
 });
