@@ -1,0 +1,34 @@
+---
+description:
+globs:
+alwaysApply: false
+---
+# Git Configuration Setup
+
+## Overview
+This project uses a conditional Git configuration setup that changes user identity based on the repository location.
+
+## Configuration Files
+- `~/.gitconfig`: Main Git configuration file with default settings
+- `~/.gitconfig-deblock`: Conditional configuration for deblock-hq repositories
+- `~/.gitconfig.backup`: Backup of the original configuration
+
+## Configuration Details
+
+### Default Configuration
+The default configuration uses:
+- Email: bufka@dupa.pl
+- Name: Marcin Kubica
+- GPG signing enabled
+- Custom hooks path
+- Auto setup remote for push
+- Fast-forward only for pull
+
+### Deblock-specific Configuration
+For repositories in `~/Projects/deblock-hq/`, Git will use:
+- Email: marcin@deblock.com
+- GPG signing key: 714536E5000A6DDFD61F4F80566F49F6BD7B8636
+
+## Usage
+- No special action needed - Git will automatically use the appropriate configuration based on repository location
+- To restore the original configuration: `cp ~/.gitconfig.backup ~/.gitconfig`
