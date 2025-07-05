@@ -10,6 +10,10 @@
 
 This plan executes a **security-first iterative refactoring** of the 488-line Terminal MCP Server while preserving all security boundaries. Each iteration is designed to be **atomic, testable, and non-breaking**.
 
+<critical>
+At any time needed to reflect or confrm work we read ~/Projects/mcp/modelcontextprotocol/ to learn about the protocol
+</critical>
+
 ### **Core Principles**
 1. **Security boundaries are sacred** - Never compromise security for code cleanliness
 2. **Atomic iterations** - Each step can be completed and tested independently
