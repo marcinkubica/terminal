@@ -1,4 +1,55 @@
-#!/usr/bin/env node
+// --- BOUNDARY DIR ENFORCEMENT HELPERS ---
+
+function getBoundaryDir(): string {
+  return process.env.BOUNDARY_DIR || '/tmp';
+}
+
+function isBoundaryEscapeEnabled(): boolean {
+  return process.env.BOUNDARY_ESCAPE === 'true';
+}
+
+// Ensure process starts in boundary dir unless escape is enabled
+if (!isBoundaryEscapeEnabled()) {
+  const boundaryDir = getBoundaryDir();
+  if (process.cwd() !== boundaryDir) {
+    try {
+      process.chdir(boundaryDir);
+      // Optionally, log or track this change if needed
+    } catch (err) {
+      // Fail safe: do not crash, but warn
+      console.warn(`Warning: Could not change working directory to boundary dir (${boundaryDir}):`, err);
+    }
+  }
+} else {
+  console.warn('🔓 BOUNDARY_ESCAPE enabled: Directory enforcement disabled');
+}
+
+/**
+ * Resolves a user-supplied path against the current directory and ensures it stays within the boundary dir.
+ * Throws McpError if the resolved path is outside the boundary (unless BOUNDARY_ESCAPE is enabled).
+ */
+function resolveAndValidatePath(currentDir: string, userPath: string): string {
+  const resolved = path.resolve(currentDir, userPath);
+  
+  // Skip boundary validation if escape is enabled
+  if (isBoundaryEscapeEnabled()) {
+    return resolved;
+  }
+  
+  const boundary = path.resolve(getBoundaryDir());
+  // Ensure resolved path is within boundary (prefix match, with trailing slash or exact)
+  if (
+    resolved === boundary ||
+    resolved.startsWith(boundary + path.sep)
+  ) {
+    return resolved;
+  }
+  throw new McpError(
+    ErrorCode.InvalidParams,
+    `🔒 SECURITY BLOCK: Path '${resolved}' is outside the allowed boundary (${boundary})`
+  );
+}
+
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -128,43 +179,32 @@ function validateAndSanitizeCommand(command: string, args: string[]): CommandVal
     }
   }
 
-  // Validate and sanitize arguments
+  // Validate and strictly enforce allowed arguments
   const sanitizedArgs: string[] = [];
   for (const arg of args) {
     if (typeof arg !== 'string') {
       return { isValid: false, error: 'All arguments must be strings' };
     }
-
     const trimmedArg = arg.trim();
     if (!trimmedArg) continue; // Skip empty args
 
-    // Check if argument is in allowed list (for commands with restricted args)
+    // Strict: Only allow arguments explicitly in allowedArgs, or file paths if requiresFile
+    let isAllowed = false;
     if (commandConfig.allowedArgs.length > 0) {
-      const isArgAllowed = commandConfig.allowedArgs.some(allowedArg => 
-        trimmedArg === allowedArg || 
-        (allowedArg.startsWith('-') && trimmedArg.startsWith(allowedArg))
-      );
-      
-      if (!isArgAllowed && !trimmedArg.startsWith('./') && !trimmedArg.startsWith('../') && 
-          !/^[a-zA-Z0-9._/-]+$/.test(trimmedArg)) {
-        return { 
-          isValid: false, 
-          error: `Argument '${trimmedArg}' not allowed for command '${normalizedCommand}'` 
-        };
-      }
+      isAllowed = commandConfig.allowedArgs.includes(trimmedArg);
     }
-
-    // Additional validation for file arguments
+    // Allow file paths for commands that require a file, but only if the arg does not start with '-'
     if (commandConfig.requiresFile && !trimmedArg.startsWith('-')) {
-      // Basic path validation - prevent directory traversal attacks
-      if (trimmedArg.includes('..') && !trimmedArg.startsWith('./') && !trimmedArg.startsWith('../')) {
-        return { 
-          isValid: false, 
-          error: 'Potentially dangerous path detected' 
-        };
+      // Only allow safe file path patterns
+      if (/^\/?[a-zA-Z0-9._\/-]+$/.test(trimmedArg)) {
+        isAllowed = true;
+      } else {
+        return { isValid: false, error: `File path argument '${trimmedArg}' is not allowed` };
       }
     }
-
+    if (!isAllowed) {
+      return { isValid: false, error: `Argument '${trimmedArg}' not allowed for command '${normalizedCommand}'` };
+    }
     sanitizedArgs.push(trimmedArg);
   }
 
@@ -354,7 +394,7 @@ class TerminalServer {
     }
   }
 
-  private async handleCallTool(request: z.infer<typeof CallToolRequestSchema>) {
+  public async handleCallTool(request: z.infer<typeof CallToolRequestSchema>) {
     const { name, arguments: args } = request.params;
 
     try {
@@ -363,6 +403,12 @@ class TerminalServer {
           const parsed = ExecuteCommandSchema.safeParse(args);
           if (!parsed.success) {
             throw new McpError(ErrorCode.InvalidParams, `Invalid arguments: ${parsed.error}`);
+          }
+
+          // 🔒 SECURITY: Validate command and arguments before execution
+          const validation = validateAndSanitizeCommand(parsed.data.command, parsed.data.args);
+          if (!validation.isValid) {
+            throw new McpError(ErrorCode.InvalidParams, `🔒 SECURITY BLOCK: ${validation.error}`);
           }
 
           const result = await this.executeCommand(
@@ -381,20 +427,21 @@ class TerminalServer {
           if (!parsed.success) {
             throw new McpError(ErrorCode.InvalidParams, `Invalid arguments: ${parsed.error}`);
           }
-
-          // 🔒 SECURITY: Check for directory changes
-          const newPath = path.resolve(this.state.currentDirectory, parsed.data.path);
-          
-          // 🔒 SECURITY: Prevent directory traversal outside of safe areas
-          const homedir = os.homedir();
-          if (!newPath.startsWith(homedir) && !newPath.startsWith('/tmp') && !newPath.startsWith('/var/tmp')) {
-            throw new McpError(
-              ErrorCode.InvalidParams,
-              `🔒 SECURITY BLOCK: Directory change blocked for security: ${newPath}. Only home directory and /tmp are allowed.`
-            );
-          }
-          
+          // 🔒 SECURITY: Enforce boundary dir
+          let newPath: string;
           try {
+            newPath = resolveAndValidatePath(this.state.currentDirectory, parsed.data.path);
+          } catch (err) {
+            throw err;
+          }
+          // 🔒 SECURITY: Directory must exist
+          try {
+            if (!require('fs').existsSync(newPath)) {
+              throw new McpError(
+                ErrorCode.InvalidParams,
+                `🔒 SECURITY BLOCK: Directory does not exist: ${newPath}`
+              );
+            }
             (globalThis as any).process.chdir(newPath);
             this.state.currentDirectory = (globalThis as any).process.cwd();
             console.error(`🔒 [SECURITY] Directory changed to: ${this.state.currentDirectory}`);
@@ -405,6 +452,7 @@ class TerminalServer {
               }]
             };
           } catch (error: any) {
+            if (error instanceof McpError) throw error;
             throw new McpError(
               ErrorCode.InternalError,
               `Failed to change directory: ${error.message}`
@@ -486,3 +534,6 @@ server.run().catch((error) => {
   console.error("Fatal error running server:", error);
   (globalThis as any).process.exit(1);
 });
+
+// Export for testing
+export { TerminalServer };
