@@ -53,7 +53,7 @@ Add the following configuration:
         "[PATH_TO_REPO]/dist/index.js"
       ],
       "env": {
-        "PERMISSION_REQUIRED": "true"
+        "<somevar>": "<some-value"
       }
     }
   }
@@ -61,6 +61,7 @@ Add the following configuration:
 ```
 
 Replace `[PATH_TO_REPO]` with the actual path to your cloned repository.
+Read about `env vars` in the rest of this document.
 
 2. Restart Claude Desktop
 
