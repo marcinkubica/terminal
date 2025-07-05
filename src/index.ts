@@ -1,15 +1,42 @@
 // --- BOUNDARY DIR ENFORCEMENT HELPERS ---
+
 function getBoundaryDir(): string {
   return process.env.BOUNDARY_DIR || '/tmp';
 }
 
+function isBoundaryEscapeEnabled(): boolean {
+  return process.env.BOUNDARY_ESCAPE === 'true';
+}
+
+// Ensure process starts in boundary dir unless escape is enabled
+if (!isBoundaryEscapeEnabled()) {
+  const boundaryDir = getBoundaryDir();
+  if (process.cwd() !== boundaryDir) {
+    try {
+      process.chdir(boundaryDir);
+      // Optionally, log or track this change if needed
+    } catch (err) {
+      // Fail safe: do not crash, but warn
+      console.warn(`Warning: Could not change working directory to boundary dir (${boundaryDir}):`, err);
+    }
+  }
+} else {
+  console.warn('🔓 BOUNDARY_ESCAPE enabled: Directory enforcement disabled');
+}
+
 /**
  * Resolves a user-supplied path against the current directory and ensures it stays within the boundary dir.
- * Throws McpError if the resolved path is outside the boundary.
+ * Throws McpError if the resolved path is outside the boundary (unless BOUNDARY_ESCAPE is enabled).
  */
 function resolveAndValidatePath(currentDir: string, userPath: string): string {
-  const boundary = path.resolve(getBoundaryDir());
   const resolved = path.resolve(currentDir, userPath);
+  
+  // Skip boundary validation if escape is enabled
+  if (isBoundaryEscapeEnabled()) {
+    return resolved;
+  }
+  
+  const boundary = path.resolve(getBoundaryDir());
   // Ensure resolved path is within boundary (prefix match, with trailing slash or exact)
   if (
     resolved === boundary ||

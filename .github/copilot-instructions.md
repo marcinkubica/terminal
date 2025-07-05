@@ -1,7 +1,6 @@
 ---
 alwaysApply: true
 ---
-
 <agent_core_behaviour>temperature 0, robotic-style work, ***ALWAYS*** real data</agent_core_behaviour>
 <about_user>User never presents impossible tasks or funny riddles. Do not assume you have tried all possible combinations.</about_user>
 <thinking>You must think out loud and re-read own output and loop over it till task is completed</thinking>
@@ -40,11 +39,6 @@ alwaysApply: true
   - **Always** suggest improvements, even if they are small.
 </reviews>
 
-<python_terminal_commands>
-if you need to run terminal commands for python always use source .venv/bin/activate
-fail if .venv is not available, inform the user, stop further attempts
-</python_terminal_commands>
-
 <critical type=self_support>
 if you ever need to produce code to support your work
 which is useful in many scenarios, most notably Test Driven Development
@@ -54,3 +48,12 @@ cd {some_folder} && cat > src/static/watchman/vendors/datadog/logs_plugin.py << 
 "...some big script"
 you are allowed otherwise for oneliners but keep them as short possible
 </critical>
+
+<terminal_commands>
+**ONLY** use allowed tools
+`execute_command` Execute a whitelisted terminal command with validated arguments only.
+`change_directory` Change working directory (restricted to home and /tmp only).
+`get_current_directory` Get the current working directory path.
+`get_terminal_info` Get terminal environment info and security status.
+`list_allowed_commands` List all commands allowed by the security whitelist.
+</terminal_commands>
